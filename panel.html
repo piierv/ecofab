@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Gestión de contenedores – EcoFab Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,500..800&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/estilos.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script src="/config.js"></script>
+<script src="/comun.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="/panel">
+      <span class="brand-mark" aria-hidden="true"><i style="background:var(--pla)"></i><i style="background:var(--cur)"></i><i style="background:var(--liq)"></i><i style="background:var(--las)"></i></span>
+      <b>EcoFab Lab</b>
+    </a>
+    <nav class="nav" aria-label="Secciones">
+      <a href="/panel" aria-current="page">Panel de gestión</a>
+      <a href="/qr">Códigos QR</a>
+      <a href="/registro" target="_blank" rel="noopener">Ver registro en celular</a>
+      <a href="#" id="logout" hidden>Cerrar sesión</a>
+    </nav>
+  </div>
+</header>
+<main id="view"></main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const sb = crearCliente();
+const S = {bins:{}, regs:[], alerts:[], pickups:[]};
+let sliderVal=null, pickArmed=0, canal=null;
+
+/* ---------- Sesión ---------- */
+function renderLogin(msg){
+  $("#logout").hidden=true;
+  $("#view").innerHTML=`<form class="login" id="login-form">
+    <h1>Panel de gestión</h1>
+    <p>Entra con la cuenta del equipo del laboratorio.</p>
+    <label for="em">Correo</label><input id="em" type="email" autocomplete="username" required>
+    <label for="pw">Contraseña</label><input id="pw" type="password" autocomplete="current-password" required>
+    <p class="err" id="login-err" role="alert">${msg?esc(msg):""}</p>
+    <button class="cta" type="submit">Entrar al panel</button>
+  </form>`;
+  $("#login-form").addEventListener("submit",async e=>{
+    e.preventDefault();
+    const {error}=await sb.auth.signInWithPassword({email:$("#em").value.trim(),password:$("#pw").value});
+    if(error){$("#login-err").textContent="Correo o contraseña incorrectos.";return}
+    iniciar();
+  });
+}
+$("#logout").addEventListener("click",async e=>{e.preventDefault();if(canal){sb.removeChannel(canal);canal=null}await sb.auth.signOut();renderLogin()});
+
+async function iniciar(){
+  if(!sb)return;
+  const {data:{session}}=await sb.auth.getSession();
+  if(!session)return renderLogin();
+  const {data:esStaff}=await sb.rpc("es_staff");
+  if(!esStaff){await sb.auth.signOut();return renderLogin("Esta cuenta no está autorizada para el panel. Pide que la agreguen al equipo del laboratorio.")}
+  $("#logout").hidden=false;
+  $("#view").innerHTML=`<p class="empty">Cargando datos…</p>`;
+  await Promise.all([cargar("contenedores"),cargar("registros"),cargar("avisos"),cargar("retiros")]);
+  renderGestion();
+  suscribir();
+}
+
+/* ---------- Datos ---------- */
+async function cargar(tabla){
+  if(tabla==="contenedores"){const {data}=await sb.from("contenedores").select("*").order("id");if(data){S.bins={};data.forEach(c=>S.bins[c.id]=c)}}
+  if(tabla==="registros"){const desde=new Date();desde.setDate(1);desde.setHours(0,0,0,0);desde.setDate(desde.getDate()-31);
+    const {data}=await sb.from("registros").select("*").gte("creado",desde.toISOString()).order("creado",{ascending:false}).limit(2000);if(data)S.regs=data}
+  if(tabla==="avisos"){const {data}=await sb.from("avisos").select("*").order("creado",{ascending:false}).limit(30);if(data)S.alerts=data}
+  if(tabla==="retiros"){const {data}=await sb.from("retiros").select("*").order("creado",{ascending:false}).limit(30);if(data)S.pickups=data}
+}
+const pendientes=new Set();let recargaT;
+function suscribir(){
+  if(canal)return;
+  canal=sb.channel("panel");
+  ["contenedores","registros","avisos","retiros"].forEach(t=>{
+    canal.on("postgres_changes",{event:"*",schema:"public",table:t},()=>{
+      pendientes.add(t);clearTimeout(recargaT);
+      recargaT=setTimeout(async()=>{const ts=[...pendientes];pendientes.clear();await Promise.all(ts.map(cargar));renderGestion()},400);
+    });
+  });
+  canal.subscribe();
+}
+async function accion(fn,args,ok){
+  const {error}=await sb.rpc(fn,args);
+  if(error){toast(error.message||"No se pudo completar la acción.");return false}
+  if(ok)toast(ok);
+  await cargar("contenedores");await cargar("retiros");await cargar("avisos");renderGestion();
+  return true;
+}
+
+/* ---------- Vista ---------- */
+const pctOf=id=>Number((S.bins[id]||{}).pct||0);
+function binSvg(pct,hex){
+  const top=22,bottom=168,inner=bottom-top,lvl=bottom-inner*pct/100,y80=bottom-inner*.8,y95=bottom-inner*.95;
+  const shape="M24 22 H126 L118 168 Q117 176 109 176 H41 Q33 176 32 168 Z";
+  return `<svg class="bin-svg" viewBox="0 0 150 190" role="img" aria-label="Contenedor lleno al ${fmt(pct,0)} por ciento">
+    <defs><clipPath id="bin-clip"><path d="${shape}"/></clipPath></defs>
+    <path d="${shape}" fill="var(--surface-2)"/>
+    <g clip-path="url(#bin-clip)"><rect x="0" y="${lvl}" width="150" height="${190-lvl}" fill="${hex}" opacity=".88"/></g>
+    <line x1="20" x2="130" y1="${y80}" y2="${y80}" stroke="var(--warn)" stroke-dasharray="4 4" stroke-width="1.5"/>
+    <line x1="20" x2="130" y1="${y95}" y2="${y95}" stroke="var(--danger)" stroke-dasharray="4 4" stroke-width="1.5"/>
+    <text x="134" y="${y80+4}" font-size="10" fill="var(--warn)">80</text><text x="134" y="${y95+4}" font-size="10" fill="var(--danger)">95</text>
+    <path d="${shape}" fill="none" stroke="var(--ink-2)" stroke-width="2.5"/>
+    <rect x="14" y="10" width="122" height="12" rx="4" fill="var(--ink-2)"/><rect x="62" y="12" width="26" height="9" rx="2" fill="var(--surface)"/>
+  </svg>`;
+}
+function renderGestion(){
+  if(document.activeElement&&document.activeElement.id==="sim-range")return;
+  if(!S.bins.A){$("#view").innerHTML=`<p class="note danger">No se encontraron los contenedores. Revisa que el esquema SQL se haya ejecutado completo.</p>`;return}
+  const now=new Date(),dayStr=now.toDateString();
+  const mes=S.regs.filter(r=>{const d=new Date(r.creado);return d.getMonth()===now.getMonth()&&d.getFullYear()===now.getFullYear()});
+  const today=S.regs.filter(r=>new Date(r.creado).toDateString()===dayStr).length;
+  const kg=mes.reduce((a,r)=>a+Number(r.gramos)/1000,0);
+  const deps=mes.filter(r=>!r.via_operador),first=deps.filter(r=>r.intentos===1).length;
+  const acc=deps.length?first/deps.length*100:100;
+  const toPick=IDS.filter(id=>pctOf(id)>=80).length;
+  const A=S.bins.A,pA=pctOf("A"),stA=statusOf(pA);
+  const hasSensor=A.sensor_ts!=null;
+  const online=hasSensor&&A.sensor_fuente==="esp32"&&Date.now()-new Date(A.sensor_ts).getTime()<60000;
+  const sBadge=!hasSensor?`<span class="badge b-off"><i></i>Sin lecturas del sensor</span>`:online?`<span class="badge b-ok"><i></i>Sensor en línea</span>`:`<span class="badge b-off"><i></i>${A.sensor_fuente==="manual"?"Lectura de prueba":"Última lectura"} ${ago(A.sensor_ts)}</span>`;
+  if(sliderVal==null)sliderVal=Math.round(Number(A.sensor_pct||0));
+  const regA=mes.filter(r=>r.contenedor==="A").length;
+
+  $("#view").innerHTML=`<section>
+    <div class="dash-head"><div><h1>Gestión de contenedores</h1><p>Laboratorio Lab881, ${now.toLocaleDateString("es-CL",{month:"long",year:"numeric"})}</p></div>
+      <a class="btn" href="/qr">Imprimir códigos QR</a></div>
+    <p class="note info phone-note">El panel está pensado para PC o tablet. En el celular se ve en una sola columna.</p>
+    <div class="stats">
+      <div class="stat"><span>Registros hoy</span><b>${today}</b></div>
+      <div class="stat"><span>Generado este mes</span><b>${fmt(kg)}</b><small>kg</small></div>
+      <div class="stat"><span>Bien separado al primer intento</span><b>${fmt(acc,0)}</b><small>%</small></div>
+      <div class="stat"><span>Por retirar</span><b>${toPick}</b><small>de 4</small></div>
+    </div>
+    <div class="grid2"><div>
+      <div class="panel"><h2>Contenedor A, PLA <small>prototipo con sensor</small></h2>
+        <div class="live">${binSvg(pA,BINS.A.hex)}
+          <div>
+            <div class="big">${fmt(pA,0)}<small> %</small></div>
+            <div class="meta">${hasSensor?(A.sensor_fuente==="esp32"?`Medido por el sensor ultrasónico${A.sensor_dist!=null?`, a ${fmt(A.sensor_dist)} cm de la superficie`:""}.`:"Nivel puesto con la lectura de prueba."):"Sin sensor conectado: el nivel se estima con los registros."} ${regA} registro${regA===1?"":"s"} este mes.</div>
+            <p style="display:flex;gap:6px;flex-wrap:wrap;margin:0 0 12px"><span class="badge b-${stA.k}"><i></i>${stA.t}</span>${sBadge}</p>
+            <button class="btn dark" data-pick="A">Registrar retiro</button>
+          </div>
+        </div>
+        <div class="sensor-row">
+          <label for="sim-range">Lectura de prueba</label>
+          <input type="range" id="sim-range" min="0" max="100" step="1" value="${sliderVal}">
+          <b id="sim-val">${sliderVal} %</b>
+          <button class="btn" data-act="sim">Enviar lectura</button>
+        </div>
+      </div>
+      <div class="panel"><h2>Contenedores de maqueta <small>nivel estimado por registros</small></h2>
+        <div class="models">${["B","C","D"].map(id=>{const b=S.bins[id],p=pctOf(id),st=statusOf(p);return `<div class="model">
+          <div class="h"><span class="mini" style="background:${BINS[id].hex}">${id}</span><b>${esc(b.nombre)}</b></div>
+          <div class="bar"><i style="width:${p}%;background:${BINS[id].hex}"></i></div>
+          <div class="row"><span>${fmt(p,0)} % lleno</span><span>${fmt(b.kg)} kg</span></div>
+          <p style="margin:8px 0 0"><span class="badge b-${st.k}"><i></i>${st.t}</span></p>
+          <button class="btn" data-pick="${id}">Registrar retiro</button></div>`}).join("")}</div>
+      </div>
+      <div class="panel"><h2>Últimos registros <small>${mes.length} este mes</small></h2>
+        ${S.regs.length?`<div class="tbl"><table><thead><tr><th>Hora</th><th>Cont.</th><th>Material</th><th>Origen</th><th>Cantidad</th><th>Intentos</th></tr></thead><tbody>
+        ${S.regs.slice(0,15).map(r=>{const m=matOf(r.material);const b=BINS[r.contenedor]||BINS.A;return `<tr><td>${dayTime(r.creado)}</td><td><span class="mini" style="background:${b.hex}">${esc(r.contenedor)}</span></td><td>${esc(m?m.label:r.material)}${r.submaterial?", "+esc(r.submaterial):""}</td><td>${esc(r.origen)}</td><td>${r.estimado?"≈ ":""}${fmt(r.gramos,0)} g</td><td>${r.via_operador?"Operador":fmt(r.intentos,0)}</td></tr>`}).join("")}
+        </tbody></table></div>`:`<p class="empty">Aún no hay registros. Escanea el QR de la estación para hacer el primero.</p>`}
+      </div>
+    </div><div>
+      <div class="panel"><h2>Avisos</h2>
+        ${S.alerts.length?`<ul class="list">${S.alerts.slice(0,8).map(a=>`<li><span class="dotc" style="background:var(--${a.nivel==="full"?"danger":"warn"})"></span><span>${esc(a.texto)}<span class="when">${dayTime(a.creado)}</span></span></li>`).join("")}</ul>`:`<p class="empty">Sin avisos. Los contenedores avisan al llegar al 80 % y al 95 %.</p>`}
+      </div>
+      <div class="panel"><h2>Retiros</h2>
+        ${S.pickups.length?`<ul class="list">${S.pickups.slice(0,8).map(p=>`<li><span class="dotc" style="background:${(BINS[p.contenedor]||BINS.A).hex}"></span><span>Contenedor ${esc(p.contenedor)}: ${fmt(p.kg)} kg, al ${fmt(p.pct,0)} %. Gestor: ${esc(p.gestor)}<span class="when">${dayTime(p.creado)}</span></span></li>`).join("")}</ul>`:`<p class="empty">Todavía no se registran retiros.</p>`}
+      </div>
+      <div class="panel"><h2>Dónde está cada contenedor</h2>
+        <ul class="list">${IDS.map(id=>{const b=S.bins[id];return `<li><span class="dotc" style="background:${BINS[id].hex}"></span><span><b>${id}, ${esc(b.nombre)}</b>${b.fisico?" (físico)":" (maqueta)"}<span class="when">${esc(b.ubicacion)}. Retira: ${esc(b.gestor)}</span></span></li>`}).join("")}</ul>
+      </div>
+    </div></div>
+  </section>`;
+}
+
+$("#view").addEventListener("click",e=>{
+  const t=e.target.closest("button");if(!t||!S.bins.A)return;
+  if(t.dataset.pick){
+    const id=t.dataset.pick;
+    if(t.dataset.armed!=="1"){t.dataset.armed="1";t.textContent="Toca otra vez para confirmar";pickArmed=Date.now();return}
+    t.textContent="Registrando…";t.disabled=true;
+    accion("registrar_retiro",{p_contenedor:id},`Retiro del contenedor ${id} registrado.`);
+    return;
+  }
+  if(t.dataset.act==="sim"){
+    const v=Number($("#sim-range").value);sliderVal=v;t.disabled=true;
+    accion("lectura_prueba",{p_pct:v},`Lectura de prueba enviada: ${v} %.`);
+  }
+});
+document.addEventListener("input",e=>{if(e.target.id==="sim-range"){sliderVal=Number(e.target.value);const v=$("#sim-val");if(v)v.textContent=sliderVal+" %"}});
+document.addEventListener("change",e=>{if(e.target.id==="sim-range")e.target.blur()});
+setInterval(()=>{if(S.bins.A&&$("#logout")&&!$("#logout").hidden&&Date.now()-pickArmed>6000)renderGestion()},15000);
+
+if(sb){
+  sb.auth.onAuthStateChange((ev)=>{if(ev==="SIGNED_OUT")renderLogin()});
+  iniciar();
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Códigos QR – EcoFab Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,500..800&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/estilos.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script src="/comun.js"></script>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <a class="brand" href="/panel">
+      <span class="brand-mark" aria-hidden="true"><i style="background:var(--pla)"></i><i style="background:var(--cur)"></i><i style="background:var(--liq)"></i><i style="background:var(--las)"></i></span>
+      <b>EcoFab Lab</b>
+    </a>
+    <nav class="nav" aria-label="Secciones">
+      <a href="/panel">Panel de gestión</a>
+      <a href="/qr" aria-current="page">Códigos QR</a>
+    </nav>
+  </div>
+</header>
+<main id="view"></main>
+<script>
+function qrSvg(text){
+  if(typeof qrcode!=="function")return `<p class="empty">No se pudo cargar el generador de QR.</p>`;
+  const q=qrcode(0,"M");q.addData(text);q.make();
+  const n=q.getModuleCount(),m=2,size=n+m*2;let d="";
+  for(let r=0;r<n;r++)for(let c=0;c<n;c++)if(q.isDark(r,c))d+=`M${c+m} ${r+m}h1v1h-1z`;
+  return `<svg viewBox="0 0 ${size} ${size}" shape-rendering="crispEdges" aria-hidden="true"><rect width="${size}" height="${size}" fill="#fff"/><path d="${d}" fill="#17262A"/></svg>`;
+}
+const base=location.origin;
+const cards=[{url:base+"/registro",letter:"",title:"Estación de residuos",color:"#17262A",text:"Escanea para registrar tu residuo",kind:"Pegar en la entrada del laboratorio"}]
+  .concat(IDS.map(id=>({url:base+"/registro?c="+id,letter:id,title:BINS[id].name,color:BINS[id].hex,text:"Escanea al dejar tu residuo para confirmar",kind:BINS[id].physical?"Contenedor físico con sensor":"Contenedor de maqueta"})));
+$("#view").innerHTML=`<section>
+  <div class="qr-head"><div><h1 style="font-size:clamp(26px,4vw,36px)">Códigos QR</h1>
+    <p>Imprime esta hoja y pega cada código en su contenedor. Apuntan a ${esc(base)}, así que genérala desde la dirección definitiva de Vercel.</p></div>
+    <button class="btn dark" onclick="window.print()">Imprimir hoja</button></div>
+  <div class="sheet">${cards.map(c=>`<div class="card">
+    <div class="band" style="background:${c.color}">${c.letter?`<b>${c.letter}</b>`:""}<span>${esc(c.title)}</span></div>
+    <div class="code">${qrSvg(c.url)}</div>
+    <p>${c.text}</p><div class="kind">${c.kind}</div></div>`).join("")}</div>
+</section>`;
+</script>
+</body>
+</html>

@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Registrar residuo – EcoFab Lab</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@75..125,500..800&family=Public+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/estilos.css">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4/dist/umd/supabase.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="/config.js"></script>
+<script src="/comun.js"></script>
+</head>
+<body class="m-reg">
+<header class="rtop">
+  <div class="rtop-in">
+    <span class="brand-mark" aria-hidden="true"><i style="background:var(--pla)"></i><i style="background:var(--cur)"></i><i style="background:var(--liq)"></i><i style="background:var(--las)"></i></span>
+    <div><b>EcoFab Lab</b><small>Registro de residuos</small></div>
+  </div>
+</header>
+<main id="view"></main>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script>
+const sb = crearCliente();
+const PENDING_KEY = "ecofab-pendiente-v2";
+function getPending(){const p=lsGet(PENDING_KEY);if(!p)return null;if(Date.now()-p.createdAt>45*60e3){lsSet(PENDING_KEY,null);return null}return p}
+function setPending(p){lsSet(PENDING_KEY,p)}
+let stopScan=null;
+
+async function nivelDe(id){
+  if(!sb)return null;
+  const {data}=await sb.from("contenedores").select("id,pct,sensor_fuente").eq("id",id).maybeSingle();
+  return data;
+}
+
+const Reg = {
+  F:null, step:1, wrong:null, last:null, busy:false,
+  reset(){this.F={mat:null,sub:null,origin:null,machine:null,size:"m",grams:"",cured:false};this.wrong=null},
+  grams(){const F=this.F;const g=parseFloat(String(F.grams).replace(",","."));return isFinite(g)&&g>0?{g:Math.min(g,5000),est:false}:{g:SIZES.find(s=>s.k===F.size).g,est:true}},
+  steps(){return `<div class="steps" aria-hidden="true">${[1,2,3].map(i=>`<span class="${i<=this.step?"on":""}"></span>`).join("")}</div>`},
+  render(){
+    if(stopScan){stopScan();stopScan=null}
+    window.scrollTo(0,0);
+    ({1:()=>this.renderForm(),2:()=>this.renderAssign(),3:()=>this.renderScan(),4:()=>this.renderDone()})[this.step]();
+  },
+  renderForm(){
+    const F=this.F,m=F.mat?matOf(F.mat):null;
+    const origins=F.mat==="las"?ORIGINS.laser:ORIGINS.print;
+    $("#view").innerHTML=`<section class="flow">${this.steps()}
+      <h1>¿Qué vas a botar?</h1><p class="sub">Paso 1 de 3. Te diremos en qué contenedor va.</p>
+      <div class="field"><span class="lbl">Material</span><div class="mats">${MATERIALS.map(x=>`<button class="mat" data-mat="${x.key}" aria-pressed="${F.mat===x.key}"><span class="dot" style="background:${BINS[x.bin].hex}"></span><span><b>${x.label}</b><small>${x.desc}</small></span></button>`).join("")}</div></div>
+      ${F.mat==="las"?`<div class="field"><span class="lbl">¿Qué material cortaste?</span><div class="chips">${LASER_SUB.map(s=>`<button class="chip" data-sub="${s}" aria-pressed="${F.sub===s}">${s}</button>`).join("")}</div></div>`:""}
+      ${F.mat==="cur"?`<div class="field"><label class="check"><input type="checkbox" data-cured ${F.cured?"checked":""}><span>Confirmo que la resina está endurecida (curada con luz UV).</span></label></div>`:""}
+      ${m?`<div class="field"><span class="lbl">¿De dónde viene?</span><div class="chips">${origins.map(o=>`<button class="chip" data-origin="${o}" aria-pressed="${F.origin===o}">${o}</button>`).join("")}</div></div>
+      <div class="field"><label for="mach">Máquina</label><select id="mach" data-machine>${MACHINES[F.mat].map(x=>`<option ${F.machine===x?"selected":""}>${x}</option>`).join("")}</select></div>
+      <div class="field"><span class="lbl">Cantidad</span><div class="seg">${SIZES.map(s=>`<button data-size="${s.k}" aria-pressed="${!F.grams&&F.size===s.k}">${s.label}<small>${s.sub}</small></button>`).join("")}</div>
+        <input inputmode="decimal" data-grams placeholder="O escribe los gramos si los pesaste" value="${esc(F.grams)}" aria-label="Gramos"></div>`:""}
+      <div class="actions"><p class="err" id="form-err" role="alert"></p>
+      <button class="cta" data-act="submit">Ver dónde va</button></div>
+    </section>`;
+  },
+  renderAssign(){
+    const F=this.F,m=matOf(F.mat),b=BINS[m.bin],q=this.grams();
+    $("#view").innerHTML=`<section class="flow">${this.steps()}
+      <h1>${b.operator?"Entrégalo al operador":"Tu residuo va aquí"}</h1><p class="sub">Paso 2 de 3</p>
+      <div class="assign" style="background:${b.hex}"><div class="letter">${b.id}</div><div><div class="lead">${b.operator?"Lo guarda el operador en":"Deposítalo en el contenedor"}</div><div class="name">${b.full}</div><div class="where">${b.where}</div></div></div>
+      <div class="summary">
+        <div><span>Material</span><b>${m.label}${F.sub?", "+esc(F.sub):""}</b></div>
+        <div><span>Origen</span><b>${esc(F.origin)}</b></div>
+        <div><span>Máquina</span><b>${esc(F.machine)}</b></div>
+        <div><span>Cantidad</span><b>${q.est?"≈ ":""}${fmt(q.g,0)} g${q.est?" (estimado)":""}</b></div>
+      </div>
+      ${b.operator?`<p class="note info">El operador recibe el aviso en su panel. Espéralo en el mesón sin dejar el envase abierto.</p>`
+      :`<p class="note info">Cuando lo dejes, escanea el QR pegado en el contenedor. Puedes hacerlo aquí o con la cámara normal del celular.</p>`}
+      <div class="actions">${b.operator?`<button class="cta" data-act="operator">Avisar al operador</button>`:`<button class="cta" data-act="scan">Escanear QR del contenedor</button>`}
+      <button class="cta ghost" data-act="edit">Corregir lo que voy a botar</button></div>
+    </section>`;
+  },
+  renderScan(){
+    const m=matOf(this.F.mat);
+    $("#view").innerHTML=`<section class="flow">${this.steps()}
+      <h1>Escanea el contenedor</h1><p class="sub">Paso 3 de 3. Apunta al QR del contenedor donde dejaste tu residuo.</p>
+      <div class="scan"><video id="cam" playsinline muted></video><div class="frame"></div><div class="msg" id="scan-msg">Abriendo la cámara…</div></div>
+      ${this.wrong?`<p class="note danger">Ese es el contenedor ${this.wrong} (${BINS[this.wrong].name}). Tu residuo de ${m.key==="pla"?"PLA":m.label.toLowerCase()} va en el contenedor ${m.bin}. Sácalo y déjalo en el correcto.</p>`:""}
+      <div id="manual" hidden>
+        <p class="note info">No se pudo abrir la cámara. Escanea el QR con la cámara normal del celular, o toca el contenedor donde lo dejaste.</p>
+        <div class="tiles">${IDS.map(id=>`<button class="tile" data-bin="${id}"><span class="mini" style="background:${BINS[id].hex}">${id}</span><span><b>Contenedor ${id}</b><small>${BINS[id].name}</small></span></button>`).join("")}</div>
+      </div>
+      <div class="actions"><button class="cta ghost" data-act="back" style="margin-top:0">Volver</button></div>
+    </section>`;
+    startScanner(code=>{const id=parseBin(code);if(id){this.verify(id)}else{const el=$("#scan-msg");if(el)el.textContent="Ese QR no es de un contenedor de EcoFab."}})
+      .then(stop=>{if(!$("#cam")||this.step!==3){stop();return}stopScan=stop})
+      .catch(()=>{const el=$("#manual");if(el)el.hidden=false;const s=$(".scan");if(s)s.hidden=true});
+  },
+  renderDone(){
+    const r=this.last,b=BINS[r.bin];
+    $("#view").innerHTML=`<section class="flow"><div class="done">
+      <div class="tick"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg></div>
+      <h1>${r.operator?"Aviso enviado":"Listo, quedó registrado"}</h1>
+      <p>${r.operator?"El operador recibirá tu residuo y lo guardará en el contenedor C.":"Gracias por separar bien. Este registro ayuda al laboratorio a saber cuánto residuo genera."}</p>
+      <div class="readout"><span>Contenedor ${b.id}, ${b.name}</span><b>${r.pct==null?"…":fmt(r.pct,0)+" % lleno"}</b></div>
+    </div>
+    <div class="actions"><button class="cta" data-act="again">Registrar otro residuo</button>
+    <button class="cta ghost" data-act="finish">Terminar</button></div></section>`;
+  },
+  async verify(id){
+    const target=matOf(this.F.mat).bin;
+    const p=getPending()||{F:this.F,tries:1,createdAt:Date.now()};
+    if(id!==target){this.wrong=id;p.tries=(p.tries||1)+1;setPending(p);this.step=3;this.render();return}
+    await this.commit(target,p.tries||1);
+  },
+  async commit(binId,tries){
+    if(this.busy||!sb)return;this.busy=true;
+    const F=this.F,q=this.grams();
+    const {error}=await sb.from("registros").insert({material:F.mat,submaterial:F.sub||"",origen:F.origin,maquina:F.machine,gramos:q.g,estimado:q.est,contenedor:binId,intentos:Math.min(tries,10)});
+    this.busy=false;
+    if(error){
+      toast(/Demasiados/.test(error.message)?"Hay muchos registros en este momento. Intenta de nuevo en un minuto.":"No se pudo guardar el registro. Revisa tu conexión e inténtalo de nuevo.");
+      if(this.step!==2&&this.step!==3){this.step=2;this.render()}
+      return;
+    }
+    setPending(null);this.wrong=null;
+    this.last={bin:binId,operator:!!BINS[binId].operator,pct:null};
+    history.replaceState(null,"","/registro");
+    this.step=4;this.render();
+    const n=await nivelDe(binId);if(n&&this.step===4){this.last.pct=n.pct;this.render()}
+  }
+};
+
+$("#view").addEventListener("click",e=>{
+  const t=e.target.closest("button");if(!t)return;
+  const R=Reg,F=R.F,act=t.dataset.act;
+  if(t.dataset.mat){F.mat=t.dataset.mat;F.sub=null;F.origin=null;F.machine=MACHINES[F.mat][0];F.cured=false;R.render();return}
+  if(t.dataset.sub){F.sub=t.dataset.sub;R.render();return}
+  if(t.dataset.origin){F.origin=t.dataset.origin;R.render();return}
+  if(t.dataset.size){F.size=t.dataset.size;F.grams="";R.render();return}
+  if(t.dataset.bin){R.verify(t.dataset.bin);return}
+  if(act==="submit"){
+    const err=$("#form-err");
+    if(!F.mat){err.textContent="Elige el material para continuar.";return}
+    if(F.mat==="las"&&!F.sub){err.textContent="Indica qué material cortaste.";return}
+    if(F.mat==="cur"&&!F.cured){err.textContent="Confirma que la resina está endurecida. Si no lo está, cúrala primero.";return}
+    if(!F.origin){err.textContent="Indica de dónde viene el residuo.";return}
+    const g=parseFloat(String(F.grams).replace(",","."));
+    if(F.grams&&!(g>0)){err.textContent="Escribe los gramos como número, por ejemplo 120.";return}
+    if(g>5000){err.textContent="Para más de 5 kg, avisa al equipo del laboratorio.";return}
+    setPending({F:{...F},tries:1,createdAt:Date.now()});R.step=2;R.render();return;
+  }
+  if(act==="scan"){R.wrong=null;R.step=3;R.render();return}
+  if(act==="operator"){R.commit("C",1);return}
+  if(act==="edit"){setPending(null);R.step=1;R.render();return}
+  if(act==="back"){R.step=2;R.render();return}
+  if(act==="again"){R.reset();R.last=null;setPending(null);R.step=1;R.render();return}
+  if(act==="finish"){R.reset();R.last=null;setPending(null);R.step=1;$("#view").innerHTML=`<section class="flow"><div class="done"><h1>Gracias</h1><p>Ya puedes cerrar esta página. Para registrar otro residuo, vuelve a escanear el QR de la estación.</p></div></section>`;return}
+});
+$("#view").addEventListener("change",e=>{
+  if(e.target.matches("[data-machine]"))Reg.F.machine=e.target.value;
+  if(e.target.matches("[data-cured]")){Reg.F.cured=e.target.checked;const er=$("#form-err");if(er)er.textContent=""}
+});
+$("#view").addEventListener("input",e=>{
+  if(e.target.matches("[data-grams]")){Reg.F.grams=e.target.value;document.querySelectorAll(".seg button").forEach(b=>b.setAttribute("aria-pressed",String(!Reg.F.grams&&b.dataset.size===Reg.F.size)))}
+});
+
+/* Escáner */
+function parseBin(text){
+  const s=String(text||"");
+  let m=s.match(/[?&]c=([abcd])\b/i);if(m)return m[1].toUpperCase();
+  m=s.match(/ECOFAB[:\-]([ABCD])\b/i);if(m)return m[1].toUpperCase();
+  return null;
+}
+async function startScanner(onCode){
+  if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia)throw new Error("sin cámara");
+  const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"environment"},audio:false});
+  const video=$("#cam");if(!video){stream.getTracks().forEach(t=>t.stop());throw new Error("vista cerrada")}
+  video.srcObject=stream;await video.play();
+  const msg=$("#scan-msg");if(msg)msg.textContent="Buscando un código QR…";
+  let detector=null;
+  try{if("BarcodeDetector" in window)detector=new BarcodeDetector({formats:["qr_code"]})}catch(e){detector=null}
+  const canvas=document.createElement("canvas"),ctx=canvas.getContext("2d",{willReadFrequently:true});
+  let alive=true,busy=false,raf;
+  const tick=async()=>{
+    if(!alive)return;
+    if(!busy&&video.readyState>=2){
+      busy=true;
+      try{
+        let text=null;
+        if(detector){const r=await detector.detect(video);if(r.length)text=r[0].rawValue}
+        else if(window.jsQR){
+          const w=video.videoWidth,h=video.videoHeight,sc=Math.min(1,640/Math.max(w,h));
+          canvas.width=w*sc;canvas.height=h*sc;ctx.drawImage(video,0,0,canvas.width,canvas.height);
+          const r=jsQR(ctx.getImageData(0,0,canvas.width,canvas.height).data,canvas.width,canvas.height);if(r)text=r.data;
+        }
+        if(text&&alive){stop();onCode(text);return}
+      }catch(e){}
+      busy=false;
+    }
+    raf=requestAnimationFrame(tick);
+  };
+  const stop=()=>{alive=false;cancelAnimationFrame(raf);stream.getTracks().forEach(t=>t.stop())};
+  raf=requestAnimationFrame(tick);
+  return stop;
+}
+
+/* Llegada desde el QR de un contenedor: /registro?c=A */
+async function verContenedor(id){
+  const b=BINS[id];
+  $("#view").innerHTML=`<section class="flow">
+    <div class="assign" style="background:${b.hex}"><div class="letter">${b.id}</div><div><div class="lead">Contenedor</div><div class="name">${b.full}</div><div class="where">${b.where}</div></div></div>
+    <div class="readout"><span>Nivel de llenado</span><b id="lvl">…</b></div>
+    <p class="note info">Para registrar un residuo, primero indica qué vas a botar. Luego vuelve a escanear este código para confirmar.</p>
+    <div class="actions"><button class="cta" data-act="again">Registrar un residuo</button></div>
+  </section>`;
+  history.replaceState(null,"","/registro");
+  const n=await nivelDe(id);const el=$("#lvl");if(el&&n)el.textContent=fmt(n.pct,0)+" % lleno";
+}
+
+/* Arranque */
+(function(){
+  const c=(new URLSearchParams(location.search).get("c")||"").toUpperCase();
+  const p=getPending();
+  Reg.reset();
+  if(c&&BINS[c]){
+    if(p){Reg.F=p.F;$("#view").innerHTML=`<section class="flow"><h1>Confirmando tu depósito…</h1><p class="sub">Contenedor ${c}</p></section>`;Reg.verify(c)}
+    else verContenedor(c);
+    return;
+  }
+  if(p){Reg.F=p.F;Reg.step=2}
+  Reg.render();
+})();
+</script>
+</body>
+</html>
